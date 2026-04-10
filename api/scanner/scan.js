@@ -213,7 +213,7 @@ export default async function handler(req, res) {
     universe = "sp500_nasdaq100",
     minSignals = 4,
     minConviction = 60,
-    maxDeepAnalysis = 35,
+    maxDeepAnalysis = 80,
   } = req.body ?? {};
 
   try {
@@ -226,11 +226,11 @@ export default async function handler(req, res) {
     const preFiltered = allQuotes
       .filter(q => q.regularMarketPrice > 1)
       .sort((a, b) => quickScore(b) - quickScore(a))
-      .slice(0, Math.min(maxDeepAnalysis, 35)); // cap at 35 for Vercel timeout safety
+      .slice(0, Math.min(maxDeepAnalysis, 80)); // match original Replit behavior
 
     // Phase 3: Deep breakout analysis
     const results = [];
-    const concurrency = 6;
+    const concurrency = 10;
     for (let i = 0; i < preFiltered.length; i += concurrency) {
       const batch = preFiltered.slice(i, i + concurrency);
       const settled = await Promise.allSettled(batch.map(async q => {
