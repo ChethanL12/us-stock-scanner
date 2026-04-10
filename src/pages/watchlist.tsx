@@ -1,6 +1,36 @@
 import { useState } from "react";
-import { useGetWatchlist, useRemoveFromWatchlist, useAddToWatchlist, getGetWatchlistQueryKey } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+
+function getGetWatchlistQueryKey() { return ["/api/watchlist"]; }
+function useGetWatchlist() {
+  return useQuery({
+    queryKey: getGetWatchlistQueryKey(),
+    queryFn: async () => {
+      const r = await fetch("/api/watchlist");
+      if (!r.ok) throw new Error("Failed");
+      return r.json() as Promise<{ symbol: string; notes: string | null; addedAt: string }[]>;
+    },
+  });
+}
+function useAddToWatchlist() {
+  return useMutation({
+    mutationFn: async (opts: { data: { symbol: string; notes: string | null } }) => {
+      const r = await fetch("/api/watchlist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(opts.data) });
+      if (!r.ok) throw new Error("Failed");
+      return r.json();
+    },
+  });
+}
+function useRemoveFromWatchlist() {
+  return useMutation({
+    mutationFn: async ({ symbol }: { symbol: string }) => {
+      const r = await fetch(`/api/watchlist/${symbol}`, { method: "DELETE" });
+      if (!r.ok) throw new Error("Failed");
+      return r.json();
+    },
+  });
+}
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";

@@ -1,4 +1,16 @@
-import { useGetScanHistory } from "@workspace/api-client-react";
+import { useQuery } from "@tanstack/react-query";
+
+function useGetScanHistory() {
+  return useQuery({
+    queryKey: ["/api/scanner/history"],
+    queryFn: async () => {
+      const r = await fetch("/api/scanner/history");
+      if (!r.ok) throw new Error("Failed");
+      return r.json() as Promise<{ id: number; scannedAt: string; totalScanned: number; totalPassed: number; topSymbols: string[] }[]>;
+    },
+  });
+}
+
 import { Badge } from "@/components/ui/badge";
 import { Clock, Loader2, TrendingUp } from "lucide-react";
 

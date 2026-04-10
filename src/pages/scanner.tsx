@@ -1,6 +1,23 @@
 import { useState, useCallback } from "react";
-import { useAddToWatchlist, getGetWatchlistQueryKey } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+
+function useAddToWatchlist() {
+  return useMutation({
+    mutationFn: async (opts: { data: { symbol: string; notes: string | null } }) => {
+      const resp = await fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(opts.data),
+      });
+      if (!resp.ok) throw new Error("Failed to add to watchlist");
+      return resp.json();
+    },
+  });
+}
+
+function getGetWatchlistQueryKey() {
+  return ["/api/watchlist"];
+}
 import { useToast } from "@/hooks/use-toast";
 import * as XLSX from "xlsx";
 
