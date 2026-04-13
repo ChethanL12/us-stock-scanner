@@ -1,9 +1,9 @@
-// Vercel Serverless Function: /api/scanner/pattern-scan  ── v2 (swing-point based)
+// Vercel Serverless: /api/scanner/pattern-scan — v3 (strict swing-point rules)
 
 const YAHOO_BASE = "https://query1.finance.yahoo.com";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-const SP500_SYMBOLS = [
+const SP500 = [
   "MMM","AOS","ABT","ABBV","ACN","ADBE","AMD","AES","AFL","A","APD","ABNB","AKAM","ALB","ARE",
   "ALGN","ALLE","LNT","ALL","GOOGL","GOOG","MO","AMZN","AMCR","AEE","AAL","AEP","AXP","AIG",
   "AMT","AWK","AMP","AME","AMGN","APH","ADI","ANSS","AON","APA","AAPL","AMAT","APTV","ACGL",
@@ -37,211 +37,237 @@ const SP500_SYMBOLS = [
   "VST","VMC","GWW","WAB","WBA","WMT","DIS","WBD","WM","WAT","WEC","WFC","WELL","WST","WDC",
   "WY","WMB","WTW","WYNN","XEL","XYL","YUM","ZBRA","ZBH","ZTS"
 ];
-const NASDAQ100_SYMBOLS = [
+const NDX = [
   "AAPL","MSFT","NVDA","AMZN","META","TSLA","AVGO","GOOGL","GOOG","COST","NFLX","AMD","ADBE",
   "QCOM","TMUS","AMAT","AMGN","PEP","INTU","CMCSA","TXN","CSCO","BKNG","ADP","ISRG","HON",
   "VRTX","PANW","MU","REGN","GILD","MDLZ","KLAC","ADI","LRCX","INTC","SNPS","CEG","CDNS",
   "MCHP","FTNT","CSGP","MRNA","CRWD","MELI","KDP","CSX","PYPL","WDAY","DXCM","PCAR","ABNB",
   "NXPI","ORLY","IDXX","ROST","PAYX","ODFL","EXC","FAST","VRSK","TTD","GEHC","BIIB","ON",
   "DDOG","ZS","MNST","EA","FANG","TEAM","LULU","CHTR","ANSS","CPRT","CTAS","ROP","NDAQ",
-  "ILMN","ALGN","DLTR","AEP","XEL","EBAY","COIN","HOOD",
+  "COIN","HOOD",
 ];
-const SP500_PLUS_NASDAQ100 = [...new Set([...SP500_SYMBOLS, ...NASDAQ100_SYMBOLS])];
+const ALL = [...new Set([...SP500, ...NDX])];
 
-// ── Core Math ─────────────────────────────────────────────────────────────────
-// Linear regression on {x,y} point array
-function linReg(points) {
-  const n = points.length;
-  if (n < 2) return { slope: 0, intercept: points[0]?.y ?? 0, r2: 0 };
-  const xMean = points.reduce((s, p) => s + p.x, 0) / n;
-  const yMean = points.reduce((s, p) => s + p.y, 0) / n;
-  let num = 0, den = 0, ssTot = 0;
-  for (const p of points) {
-    num += (p.x - xMean) * (p.y - yMean);
-    den += (p.x - xMean) ** 2;
-    ssTot += (p.y - yMean) ** 2;
-  }
+// ── Math helpers ──────────────────────────────────────────────────────────────
+function linReg(pts) {
+  const n = pts.length;
+  if (n < 2) return { slope: 0, intercept: pts[0]?.y ?? 0, r2: 0, at: x => pts[0]?.y ?? 0 };
+  const xm = pts.reduce((s, p) => s + p.x, 0) / n;
+  const ym = pts.reduce((s, p) => s + p.y, 0) / n;
+  let num = 0, den = 0, tot = 0;
+  for (const { x, y } of pts) { num += (x - xm) * (y - ym); den += (x - xm) ** 2; tot += (y - ym) ** 2; }
   const slope = den ? num / den : 0;
-  const intercept = yMean - slope * xMean;
-  const ssRes = points.reduce((s, p) => s + (p.y - (slope * p.x + intercept)) ** 2, 0);
-  const r2 = ssTot > 0 ? Math.max(0, 1 - ssRes / ssTot) : 0;
-  return { slope, intercept, r2, yAtX: (x) => slope * x + intercept };
+  const int   = ym - slope * xm;
+  const res   = pts.reduce((s, { x, y }) => s + (y - (slope * x + int)) ** 2, 0);
+  const r2    = tot > 0 ? Math.max(0, 1 - res / tot) : 0;
+  return { slope, intercept: int, r2, at: x => slope * x + int };
 }
 
-// ── Swing Point Detection ─────────────────────────────────────────────────────
-// window = how many bars on EACH SIDE must be lower (for highs) or higher (for lows)
-function findSwingHighs(bars, window = 5) {
+// ── Swing pivot detection ─────────────────────────────────────────────────────
+// window = bars required to be lower (for highs) / higher (for lows) on each side
+function swingHighs(bars, window = 6) {
   const out = [];
   for (let i = window; i < bars.length - window; i++) {
     const h = bars[i].high;
     let ok = true;
-    for (let j = i - window; j <= i + window; j++) {
-      if (j !== i && bars[j].high >= h) { ok = false; break; }
-    }
+    for (let j = i - window; j <= i + window; j++) { if (j !== i && bars[j].high >= h) { ok = false; break; } }
     if (ok) out.push({ idx: i, val: h });
   }
   return out;
 }
-
-function findSwingLows(bars, window = 5) {
+function swingLows(bars, window = 6) {
   const out = [];
   for (let i = window; i < bars.length - window; i++) {
     const l = bars[i].low;
     let ok = true;
-    for (let j = i - window; j <= i + window; j++) {
-      if (j !== i && bars[j].low <= l) { ok = false; break; }
-    }
+    for (let j = i - window; j <= i + window; j++) { if (j !== i && bars[j].low <= l) { ok = false; break; } }
     if (ok) out.push({ idx: i, val: l });
   }
   return out;
 }
 
-// ── Pattern Detectors v2 (swing-point based) ──────────────────────────────────
+// Check every element is strictly less than the previous, with a minimum % drop
+function isStrictlyDecreasing(arr, minPctDrop = 0) {
+  for (let i = 1; i < arr.length; i++) {
+    if (arr[i].val >= arr[i - 1].val) return false;
+    if (minPctDrop > 0 && (arr[i - 1].val - arr[i].val) / arr[i - 1].val * 100 < minPctDrop) return false;
+  }
+  return true;
+}
+// Check every element is strictly greater than the previous, with a minimum % rise
+function isStrictlyIncreasing(arr, minPctRise = 0) {
+  for (let i = 1; i < arr.length; i++) {
+    if (arr[i].val <= arr[i - 1].val) return false;
+    if (minPctRise > 0 && (arr[i].val - arr[i - 1].val) / arr[i - 1].val * 100 < minPctRise) return false;
+  }
+  return true;
+}
+
+// ── Pattern detectors v3 ──────────────────────────────────────────────────────
 
 /**
  * FALLING WEDGE
- * Rules:
- * - At least 3 swing highs AND 3 swing lows detected
- * - Both trendlines (hi→hi, lo→lo) have NEGATIVE slope
- * - High trendline falls FASTER than low trendline (converging)
- * - Trendline R² ≥ 0.65 for both (clean lines)
- * - Width compresses by at least 30%
- * - Pattern spans at least 15 bars
- * - Price currently near bottom of wedge (potential breakout zone)
+ * Rules (confirmed from TA literature):
+ *  1. BOTH trendlines slope downward (both negative slopes)
+ *  2. Upper trendline STEEPER (more negative) than lower trendline → they converge
+ *  3. Each swing high STRICTLY LOWER than previous, by ≥1.5%  ← KEY FIX vs v1/v2
+ *  4. Each swing low STRICTLY LOWER than previous, by ≥1.0%   ← KEY FIX vs v1/v2
+ *  5. At least 3 swing highs AND 3 swing lows
+ *  6. Trendline R² ≥ 0.75 on both lines
+ *  7. Width compresses ≥ 30%
+ *  8. Pattern spans 15–65 bars
+ *  9. Most recent swing must be within last 18 bars (active, not historical)
  */
 function detectFallingWedge(bars) {
-  if (bars.length < 45) return null;
-  const lookback = Math.min(65, bars.length - 6);
-  const slice = bars.slice(-lookback);
+  if (bars.length < 50) return null;
+  const slice = bars.slice(-65);
+  const n = slice.length;
 
-  const sHighs = findSwingHighs(slice, 5);
-  const sLows  = findSwingLows(slice, 5);
-  if (sHighs.length < 3 || sLows.length < 3) return null;
+  const sH = swingHighs(slice, 6);
+  const sL  = swingLows(slice, 6);
+  if (sH.length < 3 || sL.length < 3) return null;
 
-  const rH = sHighs.slice(-4);
-  const rL  = sLows.slice(-4);
+  const rH = sH.slice(-4);   // up to 4 most recent swing highs
+  const rL  = sL.slice(-4);
+
+  // ① Each high must be strictly lower than the last by ≥1.5%
+  if (!isStrictlyDecreasing(rH, 1.5)) return null;
+  // ② Each low must be strictly lower than the last by ≥1.0%
+  if (!isStrictlyDecreasing(rL, 1.0)) return null;
 
   const highLine = linReg(rH.map(s => ({ x: s.idx, y: s.val })));
   const lowLine  = linReg(rL.map(s => ({ x: s.idx, y: s.val })));
 
-  // Both must be declining
+  // ③ Both trendlines must have negative slope
   if (highLine.slope >= 0 || lowLine.slope >= 0) return null;
 
-  // High line must fall faster (more negative) than low line → they converge
+  // ④ High line must fall faster (more negative) → lines CONVERGE
   if (highLine.slope >= lowLine.slope) return null;
+  if (Math.abs(highLine.slope) < Math.abs(lowLine.slope) * 1.15) return null; // must be meaningfully steeper
 
-  // Trendline quality
-  if (highLine.r2 < 0.65 || lowLine.r2 < 0.65) return null;
+  // ⑤ Trendline quality
+  if (highLine.r2 < 0.75 || lowLine.r2 < 0.75) return null;
 
-  // Width compression
+  // ⑥ Width compression
   const xFirst = Math.min(rH[0].idx, rL[0].idx);
-  const xLast  = Math.max(rH[rH.length-1].idx, rL[rL.length-1].idx);
-  const wStart = highLine.yAtX(xFirst) - lowLine.yAtX(xFirst);
-  const wEnd   = highLine.yAtX(xLast)  - lowLine.yAtX(xLast);
+  const xLast  = Math.max(rH[rH.length - 1].idx, rL[rL.length - 1].idx);
+  const wStart = highLine.at(xFirst) - lowLine.at(xFirst);
+  const wEnd   = highLine.at(xLast)  - lowLine.at(xLast);
   if (wStart <= 0 || wEnd <= 0 || wEnd >= wStart) return null;
   const compression = 1 - wEnd / wStart;
   if (compression < 0.30) return null;
 
-  // Pattern must span enough bars
-  if (xLast - xFirst < 15) return null;
+  // ⑦ Duration
+  const spanBars = xLast - xFirst;
+  if (spanBars < 15 || spanBars > 65) return null;
 
-  // Price position relative to wedge at current bar
-  const lastClose = slice[slice.length - 1].close;
-  const curH = highLine.yAtX(lookback - 1);
-  const curL  = lowLine.yAtX(lookback - 1);
-  const pos = curH > curL ? (lastClose - curL) / (curH - curL) : 0.5;
-  // Should be in lower half or JUST above top (breakout setup)
-  if (pos > 1.3) return null;
+  // ⑧ RECENCY: most recent swing must be within last 18 bars
+  const lastSwing = Math.max(rH[rH.length - 1].idx, rL[rL.length - 1].idx);
+  if (n - 1 - lastSwing > 18) return null;
+
+  // ⑨ Price must be within the wedge or just above (not already far broken out)
+  const lastClose = slice[n - 1].close;
+  const curH = highLine.at(n - 1);
+  const curL  = lowLine.at(n - 1);
+  if (curH > curL && (lastClose - curL) / (curH - curL) > 1.3) return null;
 
   const r2Avg = (highLine.r2 + lowLine.r2) / 2;
   const confidence = Math.round(Math.min(
-    r2Avg * 35 +
-    compression * 35 +
-    Math.min((rH.length + rL.length - 4) * 5, 20) +
-    (pos <= 1.05 ? 10 : 0),
+    r2Avg * 30 + compression * 35 + Math.min((rH.length + rL.length - 4) * 5, 20) + 10,
     95
   ));
-  if (confidence < 55) return null;
+  if (confidence < 57) return null;
 
   return {
     name: "Falling Wedge", icon: "📐", confidence, color: "violet",
-    description: `${rH.length} swing highs · ${rL.length} swing lows · ` +
-      `Compression: ${(compression*100).toFixed(0)}% · ` +
-      `Trendline fit: ${(r2Avg*100).toFixed(0)}% · ` +
-      `${xLast - xFirst} bars`,
+    description: `${rH.length} strictly lower highs + ${rL.length} strictly lower lows · ` +
+      `Compression: ${(compression * 100).toFixed(0)}% · Fit: ${(r2Avg * 100).toFixed(0)}% · ${spanBars} bars`,
   };
 }
 
 /**
  * BULL FLAG
  * Rules:
- * - Strong POLE: ≥8% gain in 5–15 bars
- * - FLAG consolidation follows (5–18 bars)
- * - Flag range < 7% of price
- * - Flag gives back < 50% of pole height
- * - Flag highs and lows both flat/slightly declining (not another breakout)
- * - Volume contracts during flag vs. pole
+ *  1. Pole: sharp clean rally ≥10% in 5–15 bars (max intra-pole drawdown <6%)
+ *  2. Flag: PARALLEL channel (slope difference between high/low lines < threshold)
+ *  3. Flag slopes flat or slightly DOWN  (not up)
+ *  4. Flag range ≤ 6% of price
+ *  5. Retracement ≤ 50% of pole height
+ *  6. Volume contracts ≥20% during flag vs pole
+ *  7. Flag is the CURRENT most recent bars (inherent from loop placement)
  */
 function detectBullFlag(bars) {
   if (bars.length < 30) return null;
+  const N = bars.length;
 
   for (let flagLen = 5; flagLen <= 18; flagLen++) {
     for (let poleLen = 5; poleLen <= 15; poleLen++) {
       const needed = poleLen + flagLen + 3;
-      if (bars.length < needed) continue;
+      if (N < needed) continue;
 
-      const poleStart = bars.length - needed;
+      const poleStart = N - needed;
       const poleEnd   = poleStart + poleLen;
+      const poleBars  = bars.slice(poleStart, poleEnd);
       const flagBars  = bars.slice(poleEnd);
 
-      const poleOpen  = bars[poleStart].close;
-      const poleClose = bars[poleEnd - 1].close;
+      const poleOpen  = poleBars[0].close;
+      const poleClose = poleBars[poleBars.length - 1].close;
       const poleGain  = (poleClose - poleOpen) / poleOpen * 100;
-      if (poleGain < 8) continue;
+      if (poleGain < 10) continue;
 
-      // Pole must be predominantly up (no close below 70% of pole range)
-      const poleSlice = bars.slice(poleStart, poleEnd);
-      const poleMin   = Math.min(...poleSlice.map(b => b.close));
-      if (poleMin < poleOpen + (poleClose - poleOpen) * 0.25) continue;
+      // Pole must be clean (no close below 25% of pole range)
+      const poleFloor = poleOpen + (poleClose - poleOpen) * 0.25;
+      if (poleBars.some(b => b.close < poleFloor)) continue;
+
+      // Intra-pole max drawdown < 6%
+      let peak = poleOpen, maxDD = 0;
+      for (const b of poleBars) {
+        peak  = Math.max(peak, b.high);
+        maxDD = Math.max(maxDD, (peak - b.low) / peak * 100);
+      }
+      if (maxDD > 6) continue;
 
       // Flag geometry
-      const flagHighs  = flagBars.map(b => b.high);
-      const flagLows   = flagBars.map(b => b.low);
-      const fHigh      = Math.max(...flagHighs);
-      const fLow       = Math.min(...flagLows);
-      const flagRange  = (fHigh - fLow) / fHigh * 100;
-      if (flagRange > 7) continue;
+      const fHighs   = flagBars.map(b => b.high);
+      const fLows    = flagBars.map(b => b.low);
+      const fMax     = Math.max(...fHighs);
+      const fMin     = Math.min(...fLows);
+      const fRange   = (fMax - fMin) / fMax * 100;
+      if (fRange > 6) continue;
 
-      // Pullback check — must not give back >50% of pole
-      const poleHeight  = poleClose - poleOpen;
-      const flagPullback = poleClose - Math.min(...flagBars.map(b => b.close));
-      if (flagPullback > poleHeight * 0.5) continue;
+      // Pullback ≤ 50%
+      const poleH    = poleClose - poleOpen;
+      const pullback = poleClose - Math.min(...flagBars.map(b => b.close));
+      if (pullback > poleH * 0.50) continue;
 
-      // Both flag trendlines flat or slightly DOWN (proper flag shape)
-      const hReg = linReg(flagHighs.map((h, i) => ({ x: i, y: h })));
-      const lReg = linReg(flagLows.map((l, i) => ({ x: i, y: l })));
-      const maxAllowedSlope = poleClose * 0.004; // 0.4% per bar max
-      if (hReg.slope > maxAllowedSlope || lReg.slope > maxAllowedSlope) continue;
+      // PARALLEL CHANNEL: both line slopes within 0.4% of price per bar of each other
+      const hReg = linReg(fHighs.map((h, i) => ({ x: i, y: h })));
+      const lReg = linReg(fLows.map((l, i)  => ({ x: i, y: l })));
+      const slopeDiff = Math.abs(hReg.slope - lReg.slope);
+      if (slopeDiff > poleClose * 0.004) continue; // not parallel → not a flag
+
+      // Both lines must be flat or slightly down (not trending up)
+      const maxUpSlope = poleClose * 0.003;
+      if (hReg.slope > maxUpSlope || lReg.slope > maxUpSlope) continue;
 
       // Volume contraction during flag
-      const poleVol = poleSlice.reduce((s, b) => s + b.volume, 0) / poleLen;
+      const poleVol = poleBars.reduce((s, b) => s + b.volume, 0) / poleLen;
       const flagVol = flagBars.reduce((s, b) => s + b.volume, 0) / flagLen;
-      const volContracting = flagVol < poleVol * 0.85;
+      const volOK   = flagVol < poleVol * 0.80;
 
-      const gainScore = Math.min(poleGain * 3, 40);
-      const tightScore = Math.max(0, (7 - flagRange) * 4);
-      const volScore = volContracting ? 20 : 5;
-      const pbScore = Math.max(0, (0.5 - flagPullback / poleHeight) * 20);
+      const gainScore = Math.min(poleGain * 2.5, 40);
+      const tightScore = Math.max(0, (6 - fRange) * 5);
+      const volScore  = volOK ? 20 : 5;
+      const pbScore   = Math.max(0, (0.50 - pullback / poleH) * 20);
 
       const confidence = Math.round(Math.min(gainScore + tightScore + volScore + pbScore, 95));
-      if (confidence < 55) continue;
+      if (confidence < 57) continue;
 
       return {
         name: "Bull Flag", icon: "🏳️", confidence, color: "emerald",
-        description: `Pole: +${poleGain.toFixed(1)}% in ${poleLen} bars · ` +
-          `Flag range: ${flagRange.toFixed(1)}% · ` +
-          `Pullback: ${(flagPullback/poleHeight*100).toFixed(0)}% of pole · ` +
-          `Vol: ${volContracting ? "contracting ✓" : "not contracting"}`,
+        description: `Pole: +${poleGain.toFixed(1)}% (${poleLen} bars) · ` +
+          `Flag range: ${fRange.toFixed(1)}% · Pullback: ${(pullback / poleH * 100).toFixed(0)}% of pole · ` +
+          `Vol: ${volOK ? "contracting ✓" : "not contracting"}`,
       };
     }
   }
@@ -251,113 +277,138 @@ function detectBullFlag(bars) {
 /**
  * ASCENDING TRIANGLE
  * Rules:
- * - At least 3 swing highs all within 2.5% of each other (flat resistance)
- * - At least 3 swing lows with clearly positive regression slope (R² ≥ 0.65)
- * - Pattern spans ≥20 bars
- * - Current price ≥ 92% of resistance (approaching breakout)
+ *  1. Flat resistance: ≥3 swing highs all within 2% of each other
+ *  2. Rising support:  ≥3 swing lows, EACH STRICTLY HIGHER than previous by ≥0.5%
+ *  3. Regression of lows: positive slope, R² ≥ 0.70
+ *  4. Pattern spans ≥ 20 bars
+ *  5. Current price between 93%–103% of resistance (approaching breakout zone)
+ *  6. Most recent swing within last 15 bars
  */
 function detectAscendingTriangle(bars) {
-  if (bars.length < 40) return null;
-  const lookback = Math.min(70, bars.length - 6);
-  const slice = bars.slice(-lookback);
+  if (bars.length < 45) return null;
+  const slice = bars.slice(-70);
+  const n = slice.length;
 
-  const sHighs = findSwingHighs(slice, 4);
-  const sLows  = findSwingLows(slice, 4);
-  if (sHighs.length < 3 || sLows.length < 3) return null;
+  const sH = swingHighs(slice, 4);
+  const sL  = swingLows(slice, 4);
+  if (sH.length < 3 || sL.length < 3) return null;
 
-  const rH = sHighs.slice(-4);
-  const rL  = sLows.slice(-4);
+  const rH = sH.slice(-5);
+  const rL  = sL.slice(-5);
 
-  // Resistance: all swing highs within 2.5%
-  const maxH = Math.max(...rH.map(s => s.val));
-  const minH = Math.min(...rH.map(s => s.val));
+  // ① Flat resistance: all highs within 2%
+  const maxH   = Math.max(...rH.map(s => s.val));
+  const minH   = Math.min(...rH.map(s => s.val));
   const spread = (maxH - minH) / maxH * 100;
-  if (spread > 2.5) return null;
+  if (spread > 2.0) return null;
 
-  // Support: rising swing lows
+  // ② Strictly increasing lows, each ≥0.5% above previous
+  if (!isStrictlyIncreasing(rL, 0.5)) return null;
+
   const lowLine = linReg(rL.map(s => ({ x: s.idx, y: s.val })));
-  if (lowLine.slope <= 0) return null;
-  if (lowLine.r2 < 0.65) return null;
+  if (lowLine.slope <= 0 || lowLine.r2 < 0.70) return null;
 
-  // Span check
-  const span = Math.max(rH[rH.length-1].idx, rL[rL.length-1].idx) - Math.min(rH[0].idx, rL[0].idx);
-  if (span < 18) return null;
+  // ③ Pattern span ≥ 20 bars
+  const xFirst = Math.min(rH[0].idx, rL[0].idx);
+  const xLast  = Math.max(rH[rH.length - 1].idx, rL[rL.length - 1].idx);
+  if (xLast - xFirst < 20) return null;
 
-  // Price proximity to resistance
-  const lastClose = slice[slice.length - 1].close;
+  // ④ Recency: most recent swing within last 15 bars
+  if (n - 1 - xLast > 15) return null;
+
+  // ⑤ Current price approaching resistance (93%–103%)
+  const lastClose = slice[n - 1].close;
   const nearness  = lastClose / maxH;
-  if (nearness < 0.92) return null;
+  if (nearness < 0.93 || nearness > 1.03) return null;
 
-  const flatScore = Math.round((2.5 - spread) / 2.5 * 40);
+  const flatScore  = Math.round((2.0 - spread) / 2.0 * 40);
   const slopeScore = Math.round(Math.min(lowLine.r2 * 30, 30));
-  const nearScore  = nearness > 0.97 ? 25 : nearness > 0.94 ? 15 : 8;
+  const nearScore  = nearness > 0.98 ? 25 : nearness > 0.95 ? 15 : 8;
 
   const confidence = Math.min(flatScore + slopeScore + nearScore, 95);
-  if (confidence < 55) return null;
+  if (confidence < 57) return null;
 
   return {
     name: "Ascending Triangle", icon: "🔺", confidence, color: "sky",
     description: `Resistance: $${minH.toFixed(2)}–$${maxH.toFixed(2)} (${spread.toFixed(1)}% spread) · ` +
-      `Rising lows (R²=${(lowLine.r2*100).toFixed(0)}%) · ` +
-      `Price at ${(nearness*100).toFixed(1)}% of resistance`,
+      `${rL.length} rising lows (R²=${(lowLine.r2 * 100).toFixed(0)}%) · ` +
+      `Price at ${(nearness * 100).toFixed(1)}% of resistance`,
   };
 }
 
 /**
  * DOUBLE BOTTOM
  * Rules:
- * - 2 clear swing lows within 3% of each other (window ≥ 6 bars)
- * - Separated by at least 10 bars
- * - Clear swing high between them (neckline), at least 5% above lows
- * - Second bottom NOT lower than first (no lower low = strength)
- * - Price at least 50% recovered toward neckline (or above it)
+ *  1. Prior downtrend: avg price 20 bars before L1 must be ≥12% above L1
+ *  2. Two prominent swing lows within 2.5% of each other
+ *  3. Second low ≥ first low × 0.975 (second not below first)
+ *  4. Separated by 15–55 bars
+ *  5. Neckline (highest high between bottoms) ≥8% above the lows
+ *  6. L2 WITHIN LAST 25 BARS  ← KEY FIX that eliminates historical patterns
+ *  7. Current price ≥55% recovered from L2 toward neckline (or above it)
  */
 function detectDoubleBottom(bars) {
-  if (bars.length < 45) return null;
-  const lookback = Math.min(90, bars.length - 6);
-  const slice = bars.slice(-lookback);
+  if (bars.length < 50) return null;
+  const slice = bars.slice(-85);
+  const n = slice.length;
 
-  const sLows  = findSwingLows(slice, 6);
-  const sHighs = findSwingHighs(slice, 4);
-  if (sLows.length < 2 || sHighs.length < 1) return null;
+  const sL = swingLows(slice, 7);    // window=7 → only prominent lows
+  const sH = swingHighs(slice, 4);
+  if (sL.length < 2 || sH.length < 1) return null;
 
-  const recentL = sLows.slice(-5);
+  const recentL = sL.slice(-6);
 
   for (let i = 0; i < recentL.length - 1; i++) {
     for (let j = i + 1; j < recentL.length; j++) {
       const L1 = recentL[i], L2 = recentL[j];
-      if (L2.idx - L1.idx < 10) continue;
 
+      // ① Separation 15–55 bars
+      const sep = L2.idx - L1.idx;
+      if (sep < 15 || sep > 55) continue;
+
+      // ② RECENCY: L2 must be within last 25 bars ← THE KEY FIX
+      if (n - 1 - L2.idx > 25) continue;
+
+      // ③ Within 2.5% of each other
       const diff = Math.abs(L1.val - L2.val) / L1.val * 100;
-      if (diff > 3) continue;
+      if (diff > 2.5) continue;
 
-      // Second low must NOT be lower than first (otherwise it's not a W)
+      // ④ L2 not below L1 (if L2 lower, bearish momentum not exhausted)
       if (L2.val < L1.val * 0.975) continue;
 
-      // Find highest swing high between the two lows
-      const between = sHighs.filter(h => h.idx > L1.idx && h.idx < L2.idx);
+      // ⑤ Prior downtrend before L1
+      const preStart = Math.max(0, L1.idx - 30);
+      const preEnd   = Math.max(0, L1.idx - 5);
+      if (preEnd <= preStart) continue;
+      const preAvg = slice.slice(preStart, preEnd).reduce((s, b) => s + b.close, 0) / (preEnd - preStart);
+      const drawdownPct = (preAvg - L1.val) / preAvg * 100;
+      if (drawdownPct < 10) continue; // must have been a real downtrend into L1
+
+      // ⑥ Neckline = highest swing high strictly between L1 and L2
+      const between = sH.filter(h => h.idx > L1.idx && h.idx < L2.idx);
       if (between.length === 0) continue;
       const neckline = Math.max(...between.map(h => h.val));
-      const lift = (neckline - L1.val) / L1.val * 100;
-      if (lift < 5) continue;
+      const lift     = (neckline - L1.val) / L1.val * 100;
+      if (lift < 8) continue;
 
-      const lastClose = slice[slice.length - 1].close;
+      // ⑦ Current price recovery
+      const lastClose = slice[n - 1].close;
       const aboveNeck = lastClose > neckline;
       const recovery  = Math.min(((lastClose - L2.val) / (neckline - L2.val)) * 100, 120);
-      if (recovery < 45) continue;
+      if (recovery < 55) continue;
 
-      const symScore  = Math.round((3 - diff) / 3 * 35);
+      const symScore  = Math.round((2.5 - diff) / 2.5 * 35);
       const neckScore = Math.round(Math.min(lift * 2, 30));
-      const recScore  = aboveNeck ? 30 : Math.round(Math.min(recovery * 0.25, 25));
-
+      const recScore  = aboveNeck ? 30 : Math.round(Math.min(recovery * 0.27, 26));
       const confidence = Math.min(symScore + neckScore + recScore, 95);
-      if (confidence < 55) continue;
+      if (confidence < 57) continue;
 
       return {
         name: "Double Bottom", icon: "🔁", confidence, color: "cyan",
         description: `Lows: $${L1.val.toFixed(2)} & $${L2.val.toFixed(2)} (${diff.toFixed(1)}% apart) · ` +
           `Neckline: $${neckline.toFixed(2)} (+${lift.toFixed(1)}%) · ` +
-          `${aboveNeck ? "✓ Above neckline — confirmed breakout" : `Recovery: ${recovery.toFixed(0)}%`}`,
+          (aboveNeck ? "✓ Confirmed — above neckline" : `Recovery: ${recovery.toFixed(0)}%`) +
+          ` · Prior decline: ${drawdownPct.toFixed(0)}%`,
       };
     }
   }
@@ -367,128 +418,161 @@ function detectDoubleBottom(bars) {
 /**
  * CUP & HANDLE
  * Rules:
- * - Cup: U-shaped base over first ~70% of lookback
- *   • Left & right rims within 6% of each other
- *   • Cup depth ≥ 12% from rim to bottom
- *   • Bottom is ROUNDED (not V-shaped): bottom 40% of cup bars have < 50% of depth as range
- * - Handle: last ~30% of lookback
- *   • Range < 10% of price
- *   • Does not drop more than 8% below right rim
- * - Current price ≥ 94% of right rim (near breakout)
+ *  1. Left rim must be a high point: formed by price DECLINING into cup (not flat start)
+ *  2. Cup depth ≥12% from rim to bottom
+ *  3. U-shaped base (NOT V): mid-section range < 55% of total depth
+ *  4. Both rims within 5% of each other
+ *  5. Handle: slight downward channel, range <10%, stays above 50% of cup, drop <8% below rim
+ *  6. Current price 95%–108% of right rim (approaching breakout)
  */
 function detectCupHandle(bars) {
-  if (bars.length < 55) return null;
+  if (bars.length < 60) return null;
   const lookback = Math.min(90, bars.length - 6);
-  const slice = bars.slice(-lookback);
+  const slice    = bars.slice(-lookback);
+  const n        = slice.length;
 
-  const cupLen    = Math.floor(lookback * 0.70);
-  const cupSlice  = slice.slice(0, cupLen);
-  const hndSlice  = slice.slice(cupLen);
+  const cupLen   = Math.floor(n * 0.70);
+  const cupSlice = slice.slice(0, cupLen);
+  const hndSlice = slice.slice(cupLen);
   if (cupLen < 25 || hndSlice.length < 5) return null;
 
-  const leftRim  = cupSlice.slice(0, 5).reduce((s, b) => s + b.close, 0) / 5;
-  const rightRim = cupSlice.slice(-5).reduce((s, b) => s + b.close, 0) / 5;
-  const rimDiff  = Math.abs(leftRim - rightRim) / leftRim * 100;
-  if (rimDiff > 6) return null;
+  // Left rim: max close in first 15% of cup
+  const leftW   = Math.max(3, Math.ceil(cupLen * 0.15));
+  const leftRim = Math.max(...cupSlice.slice(0, leftW).map(b => b.close));
+
+  // Right rim: max close in last 15% of cup
+  const rightW   = Math.max(3, Math.ceil(cupLen * 0.15));
+  const rightRim = Math.max(...cupSlice.slice(-rightW).map(b => b.close));
+
+  // Rims within 5%
+  const rimDiff = Math.abs(leftRim - rightRim) / leftRim * 100;
+  if (rimDiff > 5) return null;
 
   const rimLevel = (leftRim + rightRim) / 2;
-  const cupBot   = Math.min(...cupSlice.map(b => b.low));
-  const depth    = (rimLevel - cupBot) / rimLevel * 100;
+
+  // Cup bottom = min low in middle 40%
+  const midS   = Math.floor(cupLen * 0.30);
+  const midE   = Math.floor(cupLen * 0.70);
+  const midSlc = cupSlice.slice(midS, midE);
+  const cupBot = Math.min(...midSlc.map(b => b.low));
+  const depth  = (rimLevel - cupBot) / rimLevel * 100;
   if (depth < 12) return null;
 
-  // Roundedness check: middle 40% of cup bars should have a tight range
-  const midStart = Math.floor(cupLen * 0.30);
-  const midEnd   = Math.floor(cupLen * 0.70);
-  const midSlice = cupSlice.slice(midStart, midEnd);
-  const midRange = (Math.max(...midSlice.map(b => b.high)) - Math.min(...midSlice.map(b => b.low))) / cupBot * 100;
-  if (midRange > depth * 0.60) return null; // V-shaped if mid range is too large
+  // U-shape: mid-section high-low range must be < 55% of depth
+  const midH     = Math.max(...midSlc.map(b => b.high));
+  const midRange = (midH - cupBot) / rimLevel * 100;
+  if (midRange > depth * 0.55) return null; // V-shaped → reject
 
-  // Handle checks
-  const hndHigh = Math.max(...hndSlice.map(b => b.high));
-  const hndLow  = Math.min(...hndSlice.map(b => b.low));
-  const hndRange = (hndHigh - hndLow) / hndHigh * 100;
-  if (hndRange > 10) return null;
-  const hndDrop = (rightRim - hndLow) / rightRim * 100;
-  if (hndDrop > 9) return null;
+  // Confirm left side had prior high (left rim is meaningfully higher than mid prices)
+  const leftAvg = cupSlice.slice(0, leftW).reduce((s, b) => s + b.close, 0) / leftW;
+  const midAvg  = midSlc.reduce((s, b) => s + b.close, 0) / midSlc.length;
+  if (midAvg > leftAvg * 0.88) return null; // cup bottom is not deep enough relative to rim
 
-  const lastClose = slice[slice.length - 1].close;
-  const nearRim = lastClose / rightRim;
-  if (nearRim < 0.94) return null;
+  // Handle: flat or slightly down, not spiking above rim, not falling too far
+  const hndH   = Math.max(...hndSlice.map(b => b.high));
+  const hndL   = Math.min(...hndSlice.map(b => b.low));
+  const hndRng = (hndH - hndL) / hndH * 100;
+  if (hndRng > 10) return null;
 
-  const symScore  = Math.round((6 - rimDiff) / 6 * 30);
+  // Handle stays above mid-cup price
+  const cupMidPrice = (rimLevel + cupBot) / 2;
+  if (hndL < cupMidPrice) return null;
+
+  // Handle drop from right rim < 8%
+  const hndDrop = (rightRim - hndL) / rightRim * 100;
+  if (hndDrop > 8) return null;
+
+  // Handle not sloping up
+  const hndReg = linReg(hndSlice.map((b, i) => ({ x: i, y: b.high })));
+  if (hndReg.slope > rightRim * 0.003) return null;
+
+  // Price near rim
+  const lastClose = slice[n - 1].close;
+  const nearRim   = lastClose / rightRim;
+  if (nearRim < 0.95 || nearRim > 1.08) return null;
+
+  const symScore  = Math.round((5 - rimDiff) / 5 * 30);
   const depScore  = Math.round(Math.min(depth * 1.5, 30));
-  const hndScore  = Math.round((10 - hndRange) * 2.5);
+  const hndScore  = Math.round((10 - hndRng) * 2.5);
   const rimScore  = nearRim > 1.0 ? 15 : nearRim > 0.97 ? 10 : 5;
 
   const confidence = Math.min(symScore + depScore + hndScore + rimScore, 95);
-  if (confidence < 55) return null;
+  if (confidence < 57) return null;
 
   return {
     name: "Cup & Handle", icon: "☕", confidence, color: "orange",
-    description: `Cup depth: ${depth.toFixed(1)}% · Rim symmetry: ${(100-rimDiff).toFixed(0)}% · ` +
-      `Handle: ${hndRange.toFixed(1)}% range · ` +
-      `Price at ${(nearRim*100).toFixed(0)}% of rim`,
+    description: `Cup depth: ${depth.toFixed(1)}% · Rim match: ${(100 - rimDiff).toFixed(0)}% · ` +
+      `Handle: ${hndRng.toFixed(1)}% range · Price at ${(nearRim * 100).toFixed(0)}% of rim`,
   };
 }
 
 /**
- * RISING WEDGE (bearish warning)
- * Rules: symmetric to falling wedge but upward‑sloping
+ * RISING WEDGE (bearish)
+ * Mirror of Falling Wedge:
+ *  1. Each swing high STRICTLY HIGHER than previous by ≥1.5%
+ *  2. Each swing low STRICTLY HIGHER than previous by ≥1.0%
+ *  3. Lower trendline rises FASTER (steeper positive slope) than upper → convergence
+ *  4. R² ≥ 0.75 both, compression ≥30%, span 15–65 bars, recency ≤18 bars
  */
 function detectRisingWedge(bars) {
-  if (bars.length < 45) return null;
-  const lookback = Math.min(65, bars.length - 6);
-  const slice = bars.slice(-lookback);
+  if (bars.length < 50) return null;
+  const slice = bars.slice(-65);
+  const n = slice.length;
 
-  const sHighs = findSwingHighs(slice, 5);
-  const sLows  = findSwingLows(slice, 5);
-  if (sHighs.length < 3 || sLows.length < 3) return null;
+  const sH = swingHighs(slice, 6);
+  const sL  = swingLows(slice, 6);
+  if (sH.length < 3 || sL.length < 3) return null;
 
-  const rH = sHighs.slice(-4);
-  const rL  = sLows.slice(-4);
+  const rH = sH.slice(-4);
+  const rL  = sL.slice(-4);
+
+  if (!isStrictlyIncreasing(rH, 1.5)) return null;
+  if (!isStrictlyIncreasing(rL, 1.0)) return null;
 
   const highLine = linReg(rH.map(s => ({ x: s.idx, y: s.val })));
   const lowLine  = linReg(rL.map(s => ({ x: s.idx, y: s.val })));
 
   if (highLine.slope <= 0 || lowLine.slope <= 0) return null;
-  if (lowLine.slope <= highLine.slope * 1.1) return null; // lows must rise faster
-  if (highLine.r2 < 0.65 || lowLine.r2 < 0.65) return null;
+  if (lowLine.slope <= highLine.slope * 1.15) return null; // low line must be meaningfully steeper
+  if (highLine.r2 < 0.75 || lowLine.r2 < 0.75) return null;
 
   const xFirst = Math.min(rH[0].idx, rL[0].idx);
-  const xLast  = Math.max(rH[rH.length-1].idx, rL[rL.length-1].idx);
-  const wStart = highLine.yAtX(xFirst) - lowLine.yAtX(xFirst);
-  const wEnd   = highLine.yAtX(xLast) - lowLine.yAtX(xLast);
+  const xLast  = Math.max(rH[rH.length - 1].idx, rL[rL.length - 1].idx);
+  const wStart = highLine.at(xFirst) - lowLine.at(xFirst);
+  const wEnd   = highLine.at(xLast)  - lowLine.at(xLast);
   if (wStart <= 0 || wEnd <= 0 || wEnd >= wStart) return null;
   const compression = 1 - wEnd / wStart;
   if (compression < 0.30 || xLast - xFirst < 15) return null;
 
+  const lastSwing = Math.max(rH[rH.length - 1].idx, rL[rL.length - 1].idx);
+  if (n - 1 - lastSwing > 18) return null;
+
   const r2Avg = (highLine.r2 + lowLine.r2) / 2;
   const confidence = Math.round(Math.min(
-    r2Avg * 35 + compression * 35 + Math.min((rH.length + rL.length - 4) * 5, 25),
-    95
+    r2Avg * 30 + compression * 35 + Math.min((rH.length + rL.length - 4) * 5, 20) + 10, 95
   ));
-  if (confidence < 55) return null;
+  if (confidence < 57) return null;
 
   return {
     name: "Rising Wedge", icon: "⚠️", confidence, color: "amber",
-    description: `Bearish pattern · ${rH.length} swing highs · ${rL.length} swing lows · ` +
-      `Compression: ${(compression*100).toFixed(0)}% · Fit: ${(r2Avg*100).toFixed(0)}%`,
+    description: `Bearish · ${rH.length} strictly higher highs + ${rL.length} strictly higher lows · ` +
+      `Compression: ${(compression * 100).toFixed(0)}% · Fit: ${(r2Avg * 100).toFixed(0)}%`,
   };
 }
 
-// ── Yahoo Finance ─────────────────────────────────────────────────────────────
+// ── Yahoo Finance data ────────────────────────────────────────────────────────
 async function fetchChart(symbol) {
   const url = `${YAHOO_BASE}/v8/finance/chart/${symbol}?interval=1d&range=9mo&includePrePost=false`;
   try {
-    const resp = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(9000) });
-    if (!resp.ok) return [];
-    const json = await resp.json();
-    const result = json.chart?.result?.[0];
-    if (!result?.timestamp || !result.indicators?.quote?.[0]) return [];
-    const { open, high, low, close, volume } = result.indicators.quote[0];
-    return result.timestamp.map((ts, i) => ({
+    const r = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(9000) });
+    if (!r.ok) return [];
+    const j = await r.json();
+    const res = j.chart?.result?.[0];
+    if (!res?.timestamp || !res.indicators?.quote?.[0]) return [];
+    const { open, high, low, close, volume } = res.indicators.quote[0];
+    return res.timestamp.map((ts, i) => ({
       open: open[i] ?? 0, high: high[i] ?? 0, low: low[i] ?? 0,
-      close: close[i] ?? 0, volume: volume[i] ?? 0, timestamp: ts,
+      close: close[i] ?? 0, volume: volume[i] ?? 0,
     })).filter(b => b.close > 0 && b.high > 0 && b.low > 0);
   } catch { return []; }
 }
@@ -496,14 +580,17 @@ async function fetchChart(symbol) {
 async function batchQuote(syms) {
   const url = `${YAHOO_BASE}/v8/finance/spark?symbols=${syms.join(",")}&range=1d&interval=5m`;
   try {
-    const resp = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(12000) });
-    if (!resp.ok) return new Map();
-    const json = await resp.json();
+    const r = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(12000) });
+    if (!r.ok) return new Map();
+    const j = await r.json();
     const map = new Map();
-    for (const d of Object.values(json)) {
+    for (const d of Object.values(j)) {
       if (d?.close?.length > 0) {
-        const price = d.close[d.close.length - 1] ?? d.previousClose;
-        map.set(d.symbol, { price, changePct: d.previousClose > 0 ? ((price - d.previousClose) / d.previousClose) * 100 : 0 });
+        const price = d.close[d.close.length - 1] ?? d.previousClose ?? 0;
+        map.set(d.symbol, {
+          price,
+          changePct: d.previousClose > 0 ? (price - d.previousClose) / d.previousClose * 100 : 0,
+        });
       }
     }
     return map;
@@ -515,18 +602,18 @@ async function batchQuoteAll(symbols) {
   const chunks = [];
   for (let i = 0; i < symbols.length; i += 20) chunks.push(symbols.slice(i, i + 20));
   for (let i = 0; i < chunks.length; i += 8) {
-    const maps = await Promise.all(chunks.slice(i, i + 8).map(c => batchQuote(c)));
+    const maps = await Promise.all(chunks.slice(i, i + 8).map(batchQuote));
     for (const m of maps) for (const [k, v] of m) all.set(k, v);
     if (i + 8 < chunks.length) await new Promise(r => setTimeout(r, 150));
   }
   return all;
 }
 
-function getUniverse(universe, customSymbols) {
-  if (universe === "sp500") return SP500_SYMBOLS;
-  if (universe === "nasdaq100") return NASDAQ100_SYMBOLS;
-  if (universe === "custom") return customSymbols.length > 0 ? customSymbols : ["SPY","QQQ","AAPL","TSLA","NVDA","AMD","META","AMZN","MSFT","GOOGL"];
-  return SP500_PLUS_NASDAQ100;
+function universe(u, custom) {
+  if (u === "sp500") return SP500;
+  if (u === "nasdaq100") return NDX;
+  if (u === "custom") return custom.length ? custom : NDX;
+  return ALL;
 }
 
 function calcRsi(closes) {
@@ -546,21 +633,20 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const {
-    universe = "sp500_nasdaq100",
-    symbols: customSymbols = [],
-    patterns: selectedPatterns = ["bullFlag","fallingWedge","ascendingTriangle","doubleBottom","cupHandle","risingWedge"],
-    minConfidence = 55,
-    maxSymbols = 80,
+    universe: u  = "sp500_nasdaq100",
+    symbols: sym = [],
+    patterns: sel = ["bullFlag","fallingWedge","ascendingTriangle","doubleBottom","cupHandle","risingWedge"],
+    minConfidence = 57,
+    maxSymbols    = 80,
   } = req.body ?? {};
 
   try {
-    const allSymbols = getUniverse(universe, customSymbols);
-    const quoteMap = await batchQuoteAll(allSymbols);
-
-    const ranked = [...quoteMap.entries()]
+    const syms  = universe(u, sym);
+    const qmap  = await batchQuoteAll(syms);
+    const ranked = [...qmap.entries()]
       .sort((a, b) => Math.abs(b[1].changePct) - Math.abs(a[1].changePct))
-      .slice(0, Math.min(maxSymbols, allSymbols.length))
-      .map(([sym]) => sym);
+      .slice(0, Math.min(maxSymbols, syms.length))
+      .map(([s]) => s);
 
     const detectors = {
       bullFlag: detectBullFlag,
@@ -575,23 +661,24 @@ export default async function handler(req, res) {
     for (let i = 0; i < ranked.length; i += 8) {
       const settled = await Promise.allSettled(ranked.slice(i, i + 8).map(async symbol => {
         const bars = await fetchChart(symbol);
-        if (bars.length < 45) return null;
-
-        const closes = bars.map(b => b.close);
+        if (bars.length < 50) return null;
+        const closes  = bars.map(b => b.close);
         const volumes = bars.map(b => b.volume);
-        const rsi = calcRsi(closes);
-        const avg20v = volumes.slice(-21, -1).reduce((a, b) => a + b, 0) / 20;
-        const volRatio = avg20v > 0 ? volumes[volumes.length - 1] / avg20v : 1;
+        const rsi  = calcRsi(closes);
+        const avg20 = volumes.slice(-21, -1).reduce((a, b) => a + b, 0) / 20;
+        const volRatio = avg20 > 0 ? volumes[volumes.length - 1] / avg20 : 1;
 
         const found = [];
-        for (const key of selectedPatterns) {
+        for (const key of sel) {
           if (!detectors[key]) continue;
-          const r = detectors[key](bars);
-          if (r && r.confidence >= minConfidence) found.push(r);
+          try {
+            const r = detectors[key](bars);
+            if (r && r.confidence >= minConfidence) found.push(r);
+          } catch { /* skip */ }
         }
-        if (found.length === 0) return null;
+        if (!found.length) return null;
 
-        const q = quoteMap.get(symbol) ?? { price: closes[closes.length-1], changePct: 0 };
+        const q = qmap.get(symbol) ?? { price: closes[closes.length - 1], changePct: 0 };
         return {
           symbol,
           price: +q.price.toFixed(2),
@@ -599,28 +686,27 @@ export default async function handler(req, res) {
           rsi: +rsi.toFixed(1),
           volumeRatio: +volRatio.toFixed(2),
           volume: Math.round(volumes[volumes.length - 1]),
-          avgVolume20: Math.round(avg20v),
+          avgVolume20: Math.round(avg20),
           patterns: found.sort((a, b) => b.confidence - a.confidence),
           topPattern: found[0].name,
           topConfidence: found[0].confidence,
         };
       }));
-
-      for (const r of settled) {
-        if (r.status === "fulfilled" && r.value) matches.push(r.value);
-      }
+      for (const r of settled) if (r.status === "fulfilled" && r.value) matches.push(r.value);
     }
 
     matches.sort((a, b) => b.topConfidence - a.topConfidence || b.patterns.length - a.patterns.length);
 
     return res.status(200).json({
-      matches, scannedAt: new Date().toISOString(),
-      totalScanned: ranked.length, totalMatched: matches.length,
+      matches,
+      scannedAt: new Date().toISOString(),
+      totalScanned: ranked.length,
+      totalMatched: matches.length,
       scanId: Math.random().toString(36).slice(2),
-      note: "v2 — swing-point based detection",
+      version: "v3-strict",
     });
   } catch (err) {
-    console.error("Pattern scan error:", err);
+    console.error("pattern-scan error:", err);
     return res.status(500).json({ error: err.message ?? "Scan failed" });
   }
 }
