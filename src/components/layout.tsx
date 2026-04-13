@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
-import { Activity, Clock, List, Menu, X } from "lucide-react";
+import { Activity, Clock, List, Menu, X, TrendingUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -14,6 +14,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
   const navItems = [
     { href: "/", label: "Scanner", icon: <Activity className="w-4 h-4" /> },
+    { href: "/patterns", label: "Patterns", icon: <TrendingUp className="w-4 h-4" /> },
     { href: "/watchlist", label: "Watchlist", icon: <List className="w-4 h-4" /> },
     { href: "/history", label: "History", icon: <Clock className="w-4 h-4" /> },
   ];

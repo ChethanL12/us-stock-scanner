@@ -6,6 +6,7 @@ import { Layout } from "@/components/layout";
 import ScannerPage from "@/pages/scanner";
 import WatchlistPage from "@/pages/watchlist";
 import HistoryPage from "@/pages/history";
+import PatternScannerPage from "@/pages/pattern-scanner";
 import NotFound from "@/pages/not-found";
 
 const queryClient = new QueryClient({
@@ -24,6 +25,7 @@ function Router() {
         <Route path="/" component={ScannerPage} />
         <Route path="/watchlist" component={WatchlistPage} />
         <Route path="/history" component={HistoryPage} />
+        <Route path="/patterns" component={PatternScannerPage} />
         <Route component={NotFound} />
       </Switch>
     </Layout>
